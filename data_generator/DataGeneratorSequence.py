@@ -1,4 +1,4 @@
-from object_detection_2d_data_generator import DegenerateBatchError, DatasetError, DataGenerator
+from data_generator.object_detection_2d_data_generator import DegenerateBatchError, DatasetError, DataGenerator
 from ssd_encoder_decoder.ssd_input_encoder import SSDInputEncoder
 from data_generator.object_detection_2d_image_boxes_validation_utils import BoxFilter
 
@@ -152,7 +152,7 @@ class DataGeneratorSequence(Sequence):
         # Override the labels formats of all the transformations to make sure they are set correctly.
         if not (dataset.labels is None):
             for transform in transformations:
-                transform.labels_format = self.labels_format
+                transform.labels_format = self.dataset.labels_format
 
     def __len__(self):
         return self.length
@@ -348,3 +348,5 @@ class DataGeneratorSequence(Sequence):
 
             return ret
 
+    def on_epoch_end(self):
+        pass
