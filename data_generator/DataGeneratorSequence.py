@@ -103,7 +103,7 @@ class DataGeneratorSequence(Sequence):
         if length != None:
             self.length = length
         else:
-            self.length = dataset.dataset_size
+            self.length = math.floor(dataset.dataset_size / batch_size)
 
         if dataset.dataset_size == 0:
             raise DatasetError("Cannot generate batches because you did not load a dataset.")
@@ -157,196 +157,209 @@ class DataGeneratorSequence(Sequence):
     def __len__(self):
         return self.length
 
-    def __getitem__(self, current):
-        while True:
+    def __getitem__(self, index):
+        batch_X, batch_y = [], []
 
-            batch_X, batch_y = [], []
+        current = index * self.batch_size
+        if current + self.batch_size >= self.dataset.dataset_size:
+            current = self.dataset.dataset_size - self.batch_size
 
-            current = current % self.dataset.dataset_size
-            #########################################################################################
-            # Get the images, (maybe) image IDs, (maybe) labels, etc. for this batch.
-            #########################################################################################
+        #########################################################################################
+        # Get the images, (maybe) image IDs, (maybe) labels, etc. for this batch.
+        #########################################################################################
 
-            # We prioritize our options in the following order:
-            # 1) If we have the images already loaded in memory, get them from there.
-            # 2) Else, if we have an HDF5 dataset, get the images from there.
-            # 3) Else, if we have neither of the above, we'll have to load the individual image
-            #    files from disk.
-            batch_indices = self.dataset.dataset_indices[current:current+self.batch_size]
-            if not (self.dataset.images is None):
-                for i in batch_indices:
-                    batch_X.append(self.dataset.images[i])
-                if not (self.dataset.filenames is None):
-                    batch_filenames = self.dataset.filenames[current:current+self.batch_size]
-                else:
-                    batch_filenames = None
-            elif not (self.dataset.hdf5_dataset is None):
-                for i in batch_indices:
-                    batch_X.append(self.dataset.hdf5_dataset['images'][i].reshape(self.dataset.hdf5_dataset['image_shapes'][i]))
-                if not (self.dataset.filenames is None):
-                    batch_filenames = self.dataset.filenames[current:current+self.batch_size]
-                else:
-                    batch_filenames = None
-            else:
+        # We prioritize our options in the following order:
+        # 1) If we have the images already loaded in memory, get them from there.
+        # 2) Else, if we have an HDF5 dataset, get the images from there.
+        # 3) Else, if we have neither of the above, we'll have to load the individual image
+        #    files from disk.
+        batch_indices = self.dataset.dataset_indices[current:current+self.batch_size]
+        if not (self.dataset.images is None):
+            for i in batch_indices:
+                batch_X.append(self.dataset.images[i])
+            if not (self.dataset.filenames is None):
                 batch_filenames = self.dataset.filenames[current:current+self.batch_size]
-                for filename in batch_filenames:
-                    with Image.open(filename) as image:
-                        batch_X.append(np.array(image, dtype=np.uint8))
+            else:
+                batch_filenames = None
+        elif not (self.dataset.hdf5_dataset is None):
+            for i in batch_indices:
+                batch_X.append(self.dataset.hdf5_dataset['images'][i].reshape(self.dataset.hdf5_dataset['image_shapes'][i]))
+            if not (self.dataset.filenames is None):
+                batch_filenames = self.dataset.filenames[current:current+self.batch_size]
+            else:
+                batch_filenames = None
+        else:
+            batch_filenames = self.dataset.filenames[current:current+self.batch_size]
+            for filename in batch_filenames:
+                with Image.open(filename) as image:
+                    batch_X.append(np.array(image, dtype=np.uint8))
 
-            # Get the labels for this batch (if there are any).
+        # Get the labels for this batch (if there are any).
+        if not (self.dataset.labels is None):
+            batch_y = deepcopy(self.dataset.labels[current:current+self.batch_size])
+        else:
+            batch_y = None
+
+        if not (self.dataset.eval_neutral is None):
+            batch_eval_neutral = self.dataset.eval_neutral[current:current+self.batch_size]
+        else:
+            batch_eval_neutral = None
+
+        # Get the image IDs for this batch (if there are any).
+        if not (self.dataset.image_ids is None):
+            batch_image_ids = self.dataset.image_ids[current:current+self.batch_size]
+        else:
+            batch_image_ids = None
+
+        if 'original_images' in self.returns:
+            batch_original_images = deepcopy(batch_X) # The original, unaltered images
+        if 'original_labels' in self.returns:
+            batch_original_labels = deepcopy(batch_y) # The original, unaltered labels
+
+        #########################################################################################
+        # Maybe perform image transformations.
+        #########################################################################################
+
+        batch_items_to_remove = [] # In case we need to remove any images from the batch, store their indices in this list.
+        batch_inverse_transforms = []
+
+        for i in range(len(batch_X)):
+
             if not (self.dataset.labels is None):
-                batch_y = deepcopy(self.dataset.labels[current:current+self.batch_size])
-            else:
-                batch_y = None
+                # Convert the labels for this image to an array (in case they aren't already).
+                batch_y[i] = np.array(batch_y[i])
+                # If this image has no ground truth boxes, maybe we don't want to keep it in the batch.
+                if (batch_y[i].size == 0) and not self.keep_images_without_gt:
+                    batch_items_to_remove.append(i)
+                    batch_inverse_transforms.append([])
+                    continue
 
-            if not (self.dataset.eval_neutral is None):
-                batch_eval_neutral = self.dataset.eval_neutral[current:current+self.batch_size]
-            else:
-                batch_eval_neutral = None
+            # Apply any image transformations we may have received.
+            if self.transformations:
 
-            # Get the image IDs for this batch (if there are any).
-            if not (self.dataset.image_ids is None):
-                batch_image_ids = self.dataset.image_ids[current:current+self.batch_size]
-            else:
-                batch_image_ids = None
+                inverse_transforms = []
 
-            if 'original_images' in self.returns:
-                batch_original_images = deepcopy(batch_X) # The original, unaltered images
-            if 'original_labels' in self.returns:
-                batch_original_labels = deepcopy(batch_y) # The original, unaltered labels
+                for transform in self.transformations:
 
-            #########################################################################################
-            # Maybe perform image transformations.
-            #########################################################################################
+                    if not (self.dataset.labels is None):
 
-            batch_items_to_remove = [] # In case we need to remove any images from the batch, store their indices in this list.
-            batch_inverse_transforms = []
-
-            for i in range(len(batch_X)):
-
-                if not (self.dataset.labels is None):
-                    # Convert the labels for this image to an array (in case they aren't already).
-                    batch_y[i] = np.array(batch_y[i])
-                    # If this image has no ground truth boxes, maybe we don't want to keep it in the batch.
-                    if (batch_y[i].size == 0) and not self.keep_images_without_gt:
-                        batch_items_to_remove.append(i)
-                        batch_inverse_transforms.append([])
-                        continue
-
-                # Apply any image transformations we may have received.
-                if self.transformations:
-
-                    inverse_transforms = []
-
-                    for transform in self.transformations:
-
-                        if not (self.dataset.labels is None):
-
-                            if ('inverse_transform' in self.returns) and ('return_inverter' in self.inspect.signature(transform).parameters):
-                                batch_X[i], batch_y[i], inverse_transform = transform(batch_X[i], batch_y[i], return_inverter=True)
-                                inverse_transforms.append(inverse_transform)
-                            else:
-                                batch_X[i], batch_y[i] = transform(batch_X[i], batch_y[i])
-
-                            if batch_X[i] is None: # In case the transform failed to produce an output image, which is possible for some random transforms.
-                                batch_items_to_remove.append(i)
-                                batch_inverse_transforms.append([])
-                                continue
-
+                        if ('inverse_transform' in self.returns) and ('return_inverter' in self.inspect.signature(transform).parameters):
+                            batch_X[i], batch_y[i], inverse_transform = transform(batch_X[i], batch_y[i], return_inverter=True)
+                            inverse_transforms.append(inverse_transform)
                         else:
+                            batch_X[i], batch_y[i] = transform(batch_X[i], batch_y[i])
 
-                            if ('inverse_transform' in self.returns) and ('return_inverter' in self.inspect.signature(transform).parameters):
-                                batch_X[i], inverse_transform = transform(batch_X[i], return_inverter=True)
-                                inverse_transforms.append(inverse_transform)
-                            else:
-                                batch_X[i] = transform(batch_X[i])
+                        if batch_X[i] is None: # In case the transform failed to produce an output image, which is possible for some random transforms.
+                            batch_items_to_remove.append(i)
+                            batch_inverse_transforms.append([])
+                            continue
 
-                    batch_inverse_transforms.append(inverse_transforms[::-1])
+                    else:
 
-                #########################################################################################
-                # Check for degenerate boxes in this batch item.
-                #########################################################################################
+                        if ('inverse_transform' in self.returns) and ('return_inverter' in self.inspect.signature(transform).parameters):
+                            batch_X[i], inverse_transform = transform(batch_X[i], return_inverter=True)
+                            inverse_transforms.append(inverse_transform)
+                        else:
+                            batch_X[i] = transform(batch_X[i])
 
-                if not (self.dataset.labels is None):
-
-                    xmin = self.dataset.labels_format['xmin']
-                    ymin = self.dataset.labels_format['ymin']
-                    xmax = self.dataset.labels_format['xmax']
-                    ymax = self.dataset.labels_format['ymax']
-
-                    if np.any(batch_y[i][:,xmax] - batch_y[i][:,xmin] <= 0) or np.any(batch_y[i][:,ymax] - batch_y[i][:,ymin] <= 0):
-                        if self.degenerate_box_handling == 'warn':
-                            warnings.warn("Detected degenerate ground truth bounding boxes for batch item {} with bounding boxes {}, ".format(i, batch_y[i]) +
-                                          "i.e. bounding boxes where xmax <= xmin and/or ymax <= ymin. " +
-                                          "This could mean that your dataset contains degenerate ground truth boxes, or that any image transformations you may apply might " +
-                                          "result in degenerate ground truth boxes, or that you are parsing the ground truth in the wrong coordinate format." +
-                                          "Degenerate ground truth bounding boxes may lead to NaN errors during the training.")
-                        elif self.degenerate_box_handling == 'remove':
-                            batch_y[i] = self.box_filter(batch_y[i])
-                            if (batch_y[i].size == 0) and not self.keep_images_without_gt:
-                                batch_items_to_remove.append(i)
+                batch_inverse_transforms.append(inverse_transforms[::-1])
 
             #########################################################################################
-            # Remove any items we might not want to keep from the batch.
+            # Check for degenerate boxes in this batch item.
             #########################################################################################
 
-            if batch_items_to_remove:
-                for j in sorted(batch_items_to_remove, reverse=True):
-                    # This isn't efficient, but it hopefully shouldn't need to be done often anyway.
-                    batch_X.pop(j)
-                    batch_filenames.pop(j)
-                    if batch_inverse_transforms: batch_inverse_transforms.pop(j)
-                    if not (self.dataset.labels is None): batch_y.pop(j)
-                    if not (self.dataset.image_ids is None): batch_image_ids.pop(j)
-                    if not (self.dataset.eval_neutral is None): batch_eval_neutral.pop(j)
-                    if 'original_images' in self.returns: batch_original_images.pop(j)
-                    if 'original_labels' in self.returns and not (self.dataset.labels is None): batch_original_labels.pop(j)
+            if not (self.dataset.labels is None):
 
-            #########################################################################################
+                xmin = self.dataset.labels_format['xmin']
+                ymin = self.dataset.labels_format['ymin']
+                xmax = self.dataset.labels_format['xmax']
+                ymax = self.dataset.labels_format['ymax']
 
-            # CAUTION: Converting `batch_X` into an array will result in an empty batch if the images have varying sizes
-            #          or varying numbers of channels. At this point, all images must have the same size and the same
-            #          number of channels.
-            batch_X = np.array(batch_X)
-            if (batch_X.size == 0):
-                raise DegenerateBatchError("You produced an empty batch. This might be because the images in the batch vary " +
-                                           "in their size and/or number of channels. Note that after all transformations " +
-                                           "(if any were given) have been applied to all images in the batch, all images " +
-                                           "must be homogenous in size along all axes.")
+                if np.any(batch_y[i][:,xmax] - batch_y[i][:,xmin] <= 0) or np.any(batch_y[i][:,ymax] - batch_y[i][:,ymin] <= 0):
+                    if self.degenerate_box_handling == 'warn':
+                        warnings.warn("Detected degenerate ground truth bounding boxes for batch item {} with bounding boxes {}, ".format(i, batch_y[i]) +
+                                        "i.e. bounding boxes where xmax <= xmin and/or ymax <= ymin. " +
+                                        "This could mean that your dataset contains degenerate ground truth boxes, or that any image transformations you may apply might " +
+                                        "result in degenerate ground truth boxes, or that you are parsing the ground truth in the wrong coordinate format." +
+                                        "Degenerate ground truth bounding boxes may lead to NaN errors during the training.")
+                    elif self.degenerate_box_handling == 'remove':
+                        batch_y[i] = self.box_filter(batch_y[i])
+                        if (batch_y[i].size == 0) and not self.keep_images_without_gt:
+                            batch_items_to_remove.append(i)
 
-            #########################################################################################
-            # If we have a label encoder, encode our labels.
-            #########################################################################################
+        #########################################################################################
+        # Remove any items we might not want to keep from the batch.
+        #########################################################################################
 
-            if not (self.label_encoder is None or self.dataset.labels is None):
+        if batch_items_to_remove:
+            for j in sorted(batch_items_to_remove, reverse=True):
+                # This isn't efficient, but it hopefully shouldn't need to be done often anyway.
+                batch_X.pop(j)
+                batch_filenames.pop(j)
+                if batch_inverse_transforms: batch_inverse_transforms.pop(j)
+                if not (self.dataset.labels is None): batch_y.pop(j)
+                if not (self.dataset.image_ids is None): batch_image_ids.pop(j)
+                if not (self.dataset.eval_neutral is None): batch_eval_neutral.pop(j)
+                if 'original_images' in self.returns: batch_original_images.pop(j)
+                if 'original_labels' in self.returns and not (self.dataset.labels is None): batch_original_labels.pop(j)
 
-                if ('matched_anchors' in self.returns) and isinstance(self.label_encoder, SSDInputEncoder):
-                    batch_y_encoded, batch_matched_anchors = self.label_encoder(batch_y, diagnostics=True)
-                else:
-                    batch_y_encoded = self.label_encoder(batch_y, diagnostics=False)
-                    batch_matched_anchors = None
+        #########################################################################################
 
+        # CAUTION: Converting `batch_X` into an array will result in an empty batch if the images have varying sizes
+        #          or varying numbers of channels. At this point, all images must have the same size and the same
+        #          number of channels.
+        batch_X = np.array(batch_X)
+        if (batch_X.size == 0):
+            raise DegenerateBatchError("You produced an empty batch. This might be because the images in the batch vary " +
+                                        "in their size and/or number of channels. Note that after all transformations " +
+                                        "(if any were given) have been applied to all images in the batch, all images " +
+                                        "must be homogenous in size along all axes.")
+
+        #########################################################################################
+        # If we have a label encoder, encode our labels.
+        #########################################################################################
+
+        if not (self.label_encoder is None or self.dataset.labels is None):
+
+            if ('matched_anchors' in self.returns) and isinstance(self.label_encoder, SSDInputEncoder):
+                batch_y_encoded, batch_matched_anchors = self.label_encoder(batch_y, diagnostics=True)
             else:
-                batch_y_encoded = None
+                batch_y_encoded = self.label_encoder(batch_y, diagnostics=False)
                 batch_matched_anchors = None
 
-            #########################################################################################
-            # Compose the output.
-            #########################################################################################
+        else:
+            batch_y_encoded = None
+            batch_matched_anchors = None
 
-            ret = []
-            if 'processed_images' in self.returns: ret.append(batch_X)
-            if 'encoded_labels' in self.returns: ret.append(batch_y_encoded)
-            if 'matched_anchors' in self.returns: ret.append(batch_matched_anchors)
-            if 'processed_labels' in self.returns: ret.append(batch_y)
-            if 'filenames' in self.returns: ret.append(batch_filenames)
-            if 'image_ids' in self.returns: ret.append(batch_image_ids)
-            if 'evaluation-neutral' in self.returns: ret.append(batch_eval_neutral)
-            if 'inverse_transform' in self.returns: ret.append(batch_inverse_transforms)
-            if 'original_images' in self.returns: ret.append(batch_original_images)
-            if 'original_labels' in self.returns: ret.append(batch_original_labels)
+        #########################################################################################
+        # Compose the output.
+        #########################################################################################
 
-            return ret
+        ret = []
+        if 'processed_images' in self.returns: ret.append(batch_X)
+        if 'encoded_labels' in self.returns: ret.append(batch_y_encoded)
+        if 'matched_anchors' in self.returns: ret.append(batch_matched_anchors)
+        if 'processed_labels' in self.returns: ret.append(batch_y)
+        if 'filenames' in self.returns: ret.append(batch_filenames)
+        if 'image_ids' in self.returns: ret.append(batch_image_ids)
+        if 'evaluation-neutral' in self.returns: ret.append(batch_eval_neutral)
+        if 'inverse_transform' in self.returns: ret.append(batch_inverse_transforms)
+        if 'original_images' in self.returns: ret.append(batch_original_images)
+        if 'original_labels' in self.returns: ret.append(batch_original_labels)
+
+        return ret
 
     def on_epoch_end(self):
-        pass
+        if self.shuffle:
+            objects_to_shuffle = [self.dataset.dataset_indices]
+            if not (self.dataset.filenames is None):
+                objects_to_shuffle.append(self.dataset.filenames)
+            if not (self.dataset.labels is None):
+                objects_to_shuffle.append(self.dataset.labels)
+            if not (self.dataset.image_ids is None):
+                objects_to_shuffle.append(self.dataset.image_ids)
+            if not (self.dataset.eval_neutral is None):
+                objects_to_shuffle.append(self.dataset.eval_neutral)
+            shuffled_objects = sklearn.utils.shuffle(*objects_to_shuffle)
+            for i in range(len(objects_to_shuffle)):
+                objects_to_shuffle[i][:] = shuffled_objects[i]
